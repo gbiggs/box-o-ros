@@ -1,0 +1,11 @@
+config: {}
+description: Profile that mounts a home directory over the existing home directory
+  in the container
+devices:
+  HomeDirectory:
+    path: /home/geoff
+    required: "true"
+    source: /home/geoff
+    type: disk
+name: home_directory
+used_by: []

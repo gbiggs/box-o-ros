@@ -1,0 +1,19 @@
+config:
+  user.user-data: |
+    #cloud-config
+    merge_how:
+     - name: list
+       settings: [append]
+     - name: dict
+       settings: [no_replace, recurse_list]
+
+    runcmd:
+      - usermod -l geoff ubuntu
+      - groupmod -n geoff ubuntu
+      - usermod -d /home/geoff geoff
+      - echo "geoff ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/90-cloud-init-users
+      - echo pass | passwd --stdin geoff
+description: ""
+devices: {}
+name: set_user_name
+used_by: []

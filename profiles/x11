@@ -1,0 +1,26 @@
+config:
+  environment.DISPLAY: :0
+  raw.idmap: |-
+    uid 1000 1000
+    gid 1000 1000
+  user.user-data: |
+    #cloud-config
+    merge_how:
+     - name: list
+       settings: [append]
+     - name: dict
+       settings: [no_replace, recurse_list]
+
+    packages:
+      - x11-apps
+description: Profile for using an X11 server provided by the host to display GUI applications
+devices:
+  Xsocket:
+    bind: container
+    connect: unix:@/tmp/.X11-unix/X0
+    listen: unix:@/tmp/.X11-unix/X0
+    security.gid: "1000"
+    security.uid: "1000"
+    type: proxy
+name: x11
+used_by: []

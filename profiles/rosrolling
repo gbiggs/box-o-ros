@@ -1,0 +1,24 @@
+config:
+  user.user-data: |
+    #cloud-config
+    merge_how:
+     - name: list
+       settings: [append]
+     - name: dict
+       settings: [no_replace, recurse_list]
+
+     packages:
+       - python3-vcstool
+       - python3-rosdep
+       - python3-colcon-common-extensions
+    runcmd:
+      - apt install -y curl gnupg2 lsb-release
+      - curl -sSL https://raw.githubusercontent.com/ros/rosdistro/master/ros.key -o /usr/share/keyrings/ros-archive-keyring.gpg
+      - echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/ros-archive-keyring.gpg] http://packages.ros.org/ros2/ubuntu $(lsb_release -cs) main" | sudo tee /etc/apt/sources.list.d/ros2.list > /dev/null
+      - apt update
+      - apt install -y ros-rolling-desktop
+      - wall "ROS installation complete"
+description: Install ROS Rolling Ridley
+devices: {}
+name: rosrolling
+used_by: []

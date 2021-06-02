@@ -1,0 +1,19 @@
+config:
+  nvidia.driver.capabilities: all
+  nvidia.runtime: "true"
+  user.user-data: |
+    #cloud-config
+    merge_how:
+     - name: list
+       settings: [append]
+     - name: dict
+       settings: [no_replace, recurse_list]
+
+    packages:
+      - mesa-utils
+description: GPU profile
+devices:
+  SystemGPU:
+    type: gpu
+name: gpu
+used_by: []

@@ -1,0 +1,14 @@
+config:
+  environment.SSH_AUTH_SOCK: /tmp/ssh
+description: Provide access to the host's SSH agent
+devices:
+  SSHAgentSocket:
+    bind: container
+    connect: unix:/run/user/1000/keyring/ssh
+    listen: unix:/tmp/ssh
+    mode: "0777"
+    security.gid: "1000"
+    security.uid: "1000"
+    type: proxy
+name: sshagent
+used_by: []

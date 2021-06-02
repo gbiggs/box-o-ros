@@ -1,0 +1,7 @@
+config:
+  environment.IS_CONTAINER: "1"
+  environment.IS_LXD_CONTAINER: "1"
+description: Sets the IS_CONTAINER and IS_LXD_CONTAINER environment variables to 1
+devices: {}
+name: container_marker
+used_by: []

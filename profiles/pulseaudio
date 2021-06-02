@@ -1,0 +1,31 @@
+config:
+  environment.PULSE_SERVER: unix:/home/pulse-native
+  raw.idmap: |
+    uid 1000 1000
+    gid 1000 1000
+  user.user-data: |
+    #cloud-config
+    merge_how:
+     - name: list
+       settings: [append]
+     - name: dict
+       settings: [no_replace, recurse_list]
+
+    runcmd:
+      - 'sed -i "s/; enable-shm = yes/enable-shm = no/g" /etc/pulse/client.conf'
+    packages:
+      - pulseaudio
+description: Profile for using a PulseAudio server provided by the host
+devices:
+  PASocket:
+    bind: container
+    connect: unix:/run/user/1000/pulse/native
+    gid: "1000"
+    listen: unix:/home/pulse-native
+    mode: "0777"
+    security.gid: "1000"
+    security.uid: "1000"
+    type: proxy
+    uid: "1000"
+name: pulseaudio
+used_by: []
