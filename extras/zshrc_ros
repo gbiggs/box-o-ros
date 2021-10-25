@@ -1,0 +1,809 @@
+bat_cmd='bat'
+if ! type "bat" > /dev/null; then
+  if type 'batcat' > /dev/null; then
+    bat_cmd='batcat'
+  else
+    bat_cmd='less'
+  fi
+fi
+
+##############################################################################
+# Workspace management
+##############################################################################
+
+if [[ -z "${WORKSPACES_DIRECTORY}" ]]; then
+  WORKSPACES_DIRECTORY="${HOME}/src/workspaces"
+fi
+workspaces=${WORKSPACES_DIRECTORY}
+: ~workspaces
+
+function workspace_usage
+{
+  echo "Usage: ws <command>"
+  echo
+  echo "Commands:"
+  echo "  <name>    Go to workspace directory"
+  echo "  g <name>  Go to workspace directory"
+  echo "  n <name>  Create new workspace"
+  echo "  l         List workspaces"
+  echo "  s         Source workspace"
+  echo "  u         Update workspace"
+  echo "  c         Clean workspace"
+  echo "  t         Go to top of workspace"
+  echo "  db        Link the compile database into the workspace root"
+}
+
+function workspace_type
+{
+  if [[ $# -eq 1 ]]; then
+    base_dir="${1}"
+  else
+    base_dir="."
+  fi
+
+  if [[ -d "${base_dir}/build" && -d "${base_dir}/install" ]]; then
+    echo colcon
+  elif [[ -d "${base_dir}/build" && -d "${base_dir}/devel" ]]; then
+    echo catkin
+  elif [[ -d "${base_dir}/src" && $(ls -l "${base_dir}" | grep -c ^d) -eq 1 ]]; then
+    echo unbuilt
+  else
+    echo unknown
+  fi
+}
+
+function workspace_get_top
+{
+  directory=$(pwd)
+  while true; do
+    type="$(workspace_type ${directory})"
+    if [[ "${type}" != "unknown" ]]; then
+      echo ${directory}
+      return 0
+    fi
+    if [[ "${directory}" == '/' ]]; then
+      break
+    fi
+    directory=$(dirname ${directory})
+  done
+  return 1
+}
+
+function workspace_at_top
+{
+  if [[ "$(pwd)" == "$(workspace_get_top)" ]]; then
+    return 0
+  fi
+  return 1
+}
+
+function workspace_list
+{
+  ls ${WORKSPACES_DIRECTORY}
+}
+
+function workspace_go
+{
+  workspace_dir="${WORKSPACES_DIRECTORY}/${1}"
+  if [[ -d "${workspace_dir}" ]]; then
+    cd "${workspace_dir}"
+  else
+    echo "Workspace ${1} does not exist under ${WORKSPACES_DIRECTORY}"
+    return 1
+  fi
+}
+
+function workspace_create
+{
+  workspace_dir="${WORKSPACES_DIRECTORY}/${1}"
+  if [[ -d "${workspace_dir}" ]]; then
+    echo "Workspace ${1} already exists"
+    return 1
+  fi
+  mkdir "${workspace_dir}"
+  if [[ ! -d "${workspace_dir}" ]]; then
+    echo "Failed to create workspace directory ${1}"
+    return 1
+  fi
+  workspace_go "${1}"
+  mkdir src
+  workspace_link_compile_database
+}
+
+function workspace_source
+{
+  result=0
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  case $(workspace_type) in
+    colcon)
+      # colcon workspace
+      if [[ -f install/local_setup.zsh ]]; then
+        source install/local_setup.zsh
+      else
+        echo "Workspace is not ready for sourcing"
+        result=1
+      fi
+      ;;
+    catkin)
+      # catkin workspace
+      if [[ -f devel/setup.zsh ]]; then
+        source devel/setup.zsh
+      else
+        echo "Workspace is not ready for sourcing"
+        result=1
+      fi
+      ;;
+    unbuilt)
+      echo "Workspace is not ready for sourcing"
+      result=1
+      ;;
+    *)
+      # Not a workspace?
+      echo "Unknown workspace type"
+      result=1
+      ;;
+  esac
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function workspace_update
+{
+  result=0
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  echo "Updating remotes"
+  vcs custom --args remote update
+  if [[ -f *.repos.url ]]; then
+    for repos_url_file in *.repos.url; do
+      url=$(cat "${repos_url_file}")
+      repos_file="${repos_url_file%*.url}"
+      echo "Updating ${repos_file} from ${url}"
+      wget -O "${repos_file}" "${url}"
+    done
+  fi
+  if [[ -f *.repos ]]; then
+    for repos_file in *.repos; do
+      echo "Updating src from repos file ${repos_file}"
+      vcs import src < "${repos_file}"
+    done
+  fi
+  echo "Pulling all repositories"
+  vcs pull
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function workspace_clean
+{
+  result=0
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  case $(workspace_type) in
+    colcon)
+      # colcon workspace
+      rm -rf build install log
+      result=0
+      ;;
+    catkin)
+      # catkin workspace
+      rm -rf build devel log
+      ;;
+    unbuilt)
+      echo "Workspace is already clean"
+      ;;
+    *)
+      # Not a workspace?
+      echo "Unknown workspace type"
+      result=1
+      ;;
+  esac
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function workspace_go_to_top
+{
+  ws_top="$(workspace_get_top)"
+  if [[ $? -ne 0 ]]; then
+    echo "No workspace root found in parent directories"
+    return 1
+  fi
+  pushd "${ws_top}"
+}
+
+function workspace_link_compile_database
+{
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  compile_db="compile_commands.json"
+  if [[ -h ./${compile_db} ]]; then
+    result=0
+  elif [[ -a ./${compile_db} ]]; then
+    echo "Compile database already exists but is not a symbolic link"
+    result=1
+  else
+    ln -s build/${compile_db} .
+    result=0
+  fi
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function ws
+{
+  if [[ $# -eq 0 ]]; then
+    workspace_usage
+    return 1
+  fi
+
+  case "$1" in
+    g)
+      if [[ $# -eq 1 ]]; then
+        workspace_go_to_top
+        return $?
+      elif [[ $# -ne 2 ]]; then
+        workspace_usage
+        return 1
+      fi
+      workspace_go "${2}"
+      return $?
+      ;;
+    n)
+      if [[ $# -ne 2 ]]; then
+        workspace_usage
+        return 1
+      fi
+      workspace_create "${2}"
+      return $?
+      ;;
+    l)
+      if [[ $# -ne 1 ]]; then
+        workspace_usage
+        return 1
+      fi
+      workspace_list
+      ;;
+    s)
+      if [[ $# -ne 1 ]]; then
+        workspace_usage
+        return 1
+      fi
+      workspace_source
+      return $?
+      ;;
+    u)
+      if [[ $# -ne 1 ]]; then
+        workspace_usage
+        return 1
+      fi
+      workspace_update
+      return $?
+      ;;
+    c)
+      if [[ $# -ne 1 ]]; then
+        workspace_usage
+        return 1
+      fi
+      workspace_clean
+      return $?
+      ;;
+    t)
+      if [[ $# -ne 1 ]]; then
+        workspace_usage
+        return 1
+      fi
+      workspace_go_to_top
+      return $?
+      ;;
+    db)
+      if [[ $# -ne 1 ]]; then
+        workspace_usage
+        return 1
+      fi
+      workspace_link_compile_database
+      return $?
+      ;;
+    *)
+      if [[ $# -eq 1 ]]; then
+        workspace_go "${1}"
+        return $?
+      else
+        workspace_usage
+        return 1
+      fi
+      ;;
+  esac
+}
+
+##############################################################################
+# Colcon
+##############################################################################
+
+function colcon_usage
+{
+   echo "Usage: c <command>"
+   echo
+   echo "Commands:"
+   echo "  b             Build workspace"
+   echo "  bp <package>  Build only package"
+   echo "  bu <package>  Build up to package"
+   echo "  t             Test workspace"
+   echo "  tp <package>  Test package"
+   echo "  tr            View test results"
+   echo
+   echo "Options:"
+   echo "  -v            Verbose output"
+}
+
+COLCON_COMMON_ARGS="--symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON --ament-cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+COLCON_BUILD_COMMAND="colcon build"
+COLCON_VERBOSE_BUILD_COMMAND="VERBOSE=1 colcon build --event-handlers=console_cohesion+"
+
+function colcon_build
+{
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  if [[ $1 -eq 0 ]]; then
+    eval ${COLCON_VERBOSE_BUILD_COMMAND} ${COLCON_COMMON_ARGS}
+  else
+    eval ${COLCON_BUILD_COMMAND} ${COLCON_COMMON_ARGS}
+  fi
+  result=$?
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function colcon_build_up_to_package
+{
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  if [[ $2 -eq 0 ]]; then
+    eval ${COLCON_VERBOSE_BUILD_COMMAND} ${COLCON_COMMON_ARGS} --packages-up-to ${1}
+  else
+    eval ${COLCON_BUILD_COMMAND} ${COLCON_COMMON_ARGS} --packages-up-to ${1}
+  fi
+  result=$?
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function colcon_build_only_package
+{
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  if [[ $2 -eq 0 ]]; then
+    eval ${COLCON_VERBOSE_BUILD_COMMAND} ${COLCON_COMMON_ARGS} --packages-select ${1}
+  else
+    eval ${COLCON_BUILD_COMMAND} ${COLCON_COMMON_ARGS} --packages-select ${1}
+  fi
+  result=$?
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function colcon_test
+{
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  colcon test
+  result=$?
+  colcon test-result --verbose | ${bat_cmd}
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function colcon_test_package
+{
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  colcon test --packages-select "${1}"
+  result=$?
+  colcon test-result --verbose | ${bat_cmd}
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function colcon_view_test_results
+{
+  need_to_popd=1
+  if ! workspace_at_top; then
+    pushd "$(workspace_get_top)"
+    need_to_popd=0
+  fi
+  colcon test-result --all | ${bat_cmd}
+  result=$?
+  if [[ $need_to_popd -eq 0 ]]; then
+    popd
+  fi
+  return ${result}
+}
+
+function c
+{
+  if [[ "$(workspace_type)" == "unknown" ]]; then
+      echo "Unknown workspace type"
+      return 1
+  fi
+
+  verbose=1
+
+  if [[ $# -eq 0 ]]; then
+    colcon_build ${verbose}
+    return $?
+  fi
+
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h)
+        colcon_usage
+        return 0
+        ;;
+      -v)
+        verbose=0
+        shift
+        if [[ $# -eq 0 ]]; then
+          colcon_build ${verbose}
+          return $?
+        fi
+        ;;
+      b)
+        if [[ $# -eq 2 ]]; then
+          colcon_build_up_to_package "${2}" ${verbose}
+          return $?
+        elif [[ $# -ne 1 ]]; then
+          colcon_usage
+          return 1
+        else
+          colcon_build ${verbose}
+          return $?
+        fi
+        ;;
+      bp)
+        if [[ $# -ne 2 ]]; then
+          colcon_usage
+          return 1
+        fi
+        colcon_build_only_package "${2}" ${verbose}
+        return $?
+        ;;
+      bu)
+        if [[ $# -ne 2 ]]; then
+          colcon_usage
+          return 1
+        fi
+        colcon_build_up_to_package "${2}" ${verbose}
+        return $?
+        ;;
+      t)
+        if [[ $# -ne 1 ]]; then
+          colcon_usage
+          return 1
+        fi
+        colcon_test
+        return $?
+        ;;
+      tp)
+        if [[ $# -ne 2 ]]; then
+          colcon_usage
+          return 1
+        fi
+        colcon_test_package "${2}"
+        return $?
+        ;;
+      tr)
+        if [[ $# -ne 1 ]]; then
+          colcon_usage
+          return 1
+        fi
+        colcon_view_test_results
+        return $?
+        ;;
+      *)
+        colcon_usage
+        return 1;
+        ;;
+    esac
+  done
+}
+
+##############################################################################
+# ROS 1 distro activation
+##############################################################################
+
+_ros1_all_distributions=(kinetic lunar melodic noetic)
+_ros1_available_distributions=()
+for distro in ${_ros1_all_distributions}; do
+  if [[ -d ${ROS_BASE_DIR}/${distro} ]]; then
+    _ros1_available_distributions+=(${distro})
+  fi
+done
+_ros1_available_source_distributions=()
+if [[ -d "${ROS1_WORKSPACES_DIRECTORY}" ]]; then
+  for workspace in $(ls -l ${ROS1_WORKSPACES_DIRECTORY} | grep '^d' | awk '{ print $9; }' | tr '\n' ' '); do
+    _ros1_available_source_distributions+="${workspace}"
+  done
+fi
+
+function ros1_is_distro_available
+{
+  if [[ -n ${_ros1_available_distributions[(r)${1}]} ]]; then
+    return 0
+  elif [[ -n ${_ros1_available_source_distributions[(r)${1}]} ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+function ros1_is_source_distro
+{
+  if [[ -n ${_ros1_available_source_distributions[(r)${1}]} ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+function ros1_usage
+{
+  echo "Usage:"
+  echo
+  echo "r1 [distribution]"
+  echo
+  echo "Available ROS distributions:"
+  for distro in ${_ros1_available_distributions}; do
+    echo "  ${distro}"
+  done
+  if [[ ${#_ros1_available_source_distributions[@]} -gt 0 ]]; then
+    echo "Available ROS source distributions:"
+    for distro in ${_ros1_available_source_distributions}; do
+      echo "  ${distro}"
+    done
+  fi
+  if [[ ${#_ros1_available_distributions[@]} -eq 1 ]]; then
+    echo
+    echo "If no distribution name is provided, ${_ros1_available_distributions} will be activated"
+  fi
+}
+
+function ros1_activate_distro
+{
+  echo "Activating ROS distribution '${1}'"
+  source ${ROS_BASE_DIR}/${1}/setup.zsh
+}
+
+function ros1_activate_source_distro
+{
+  if [[ -f ${ROS1_WORKSPACES_DIRECTORY}/${1}/devel/local_setup.zsh ]]; then
+    echo "Activating ROS source distribution '${1}'"
+    source ${ROS1_WORKSPACES_DIRECTORY}/${1}/devel/local_setup.zsh
+    return $?
+  else
+    echo "Source distribution is not ready for sourcing"
+    return 1
+  fi
+}
+
+function r1
+{
+  if [[ -n "${ROS_DISTRO}" ]]; then
+    echo "ROS has already been activated in this shell."
+    return 1
+  fi
+
+  if [[ $# -eq 0 ]]; then
+    if [[ ${#_ros1_available_distributions[@]} -eq 1 ]]; then
+      ros1_activate_distro ${_ros1_available_distributions[1]}
+      return $?
+    else
+      ros1_usage
+      return 1
+    fi
+  fi
+
+  if [[ $# -ne 1 ]]; then
+    ros1_usage
+    return 1
+  fi
+
+  if [[ ${1} == '-h' ]]; then
+    ros1_usage
+    return 0
+  fi
+
+  if ros1_is_distro_available ${1}; then
+    if ros1_is_source_distro ${1}; then
+      ros1_activate_source_distro ${1}
+    else
+      ros1_activate_distro ${1}
+    fi
+    return $?
+  else
+    echo "ROS distribution '${1}' is not available"
+    return 1
+  fi
+}
+
+##############################################################################
+# ROS 2 distro activation
+##############################################################################
+
+_ros2_all_distributions=(dashing eloquent foxy galactic humble rolling)
+_ros2_available_distributions=()
+for distro in ${_ros2_all_distributions}; do
+  if [[ -d ${ROS_BASE_DIR}/${distro} ]]; then
+    _ros2_available_distributions+=(${distro})
+  fi
+done
+_ros2_available_source_distributions=()
+if [[ -d "${ROS2_WORKSPACES_DIRECTORY}" ]]; then
+  for workspace in $(ls -l ${ROS2_WORKSPACES_DIRECTORY} | grep '^d' | awk '{ print $9; }' | tr '\n' ' '); do
+    _ros2_available_source_distributions+="${workspace}"
+  done
+fi
+
+function ros2_is_distro_available
+{
+  if [[ -n ${_ros2_available_distributions[(r)${1}]} ]]; then
+    return 0
+  elif [[ -n ${_ros2_available_source_distributions[(r)${1}]} ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+function ros2_is_source_distro
+{
+  if [[ -n ${_ros2_available_source_distributions[(r)${1}]} ]]; then
+    return 0
+  else
+    return 1
+  fi
+}
+
+function ros2_usage
+{
+  echo "Usage:"
+  echo
+  echo "r2 [distribution]"
+  echo
+  echo "Available ROS 2 distributions:"
+  for distro in ${_ros2_available_distributions}; do
+    echo "  ${distro}"
+  done
+  if [[ ${#_ros2_available_source_distributions[@]} -gt 0 ]]; then
+    echo "Available ROS 2 source distributions:"
+    for distro in ${_ros2_available_source_distributions}; do
+      echo "  ${distro}"
+    done
+  fi
+  if [[ ${#_ros2_available_distributions[@]} -eq 1 ]]; then
+    echo
+    echo "If no distribution name is provided, ${_ros2_available_distributions} will be activated"
+  fi
+}
+
+function ros2_activate_distro
+{
+  echo "Activating ROS 2 distribution '${1}'"
+  source ${ROS_BASE_DIR}/${1}/setup.zsh
+  source ${ROS_BASE_DIR}/${1}/share/ros2cli/environment/ros2-argcomplete.zsh
+}
+
+function ros2_activate_source_distro
+{
+  if [[ -f ${ROS2_WORKSPACES_DIRECTORY}/${1}/install/local_setup.zsh ]]; then
+    echo "Activating ROS 2 source distribution '${1}'"
+    source ${ROS2_WORKSPACES_DIRECTORY}/${1}/install/local_setup.zsh
+    result=$?
+    if [[ -f ${ROS2_WORKSPACES_DIRECTORY}/${1}/install/ros2cli/share/environment/ros2-argcomplete.zsh ]]; then
+      source ${ROS2_WORKSPACES_DIRECTORY}/${1}/install/ros2cli/share/environment/ros2-argcomplete.zsh
+    fi
+    return ${result}
+  else
+    echo "Source distribution is not ready for sourcing"
+    return 1
+  fi
+}
+
+function r2
+{
+  if [[ -n "${ROS_DISTRO}" ]]; then
+    echo "ROS has already been activated in this shell."
+    return 1
+  fi
+
+  if [[ $# -eq 0 ]]; then
+    if [[ ${#_ros2_available_distributions[@]} -eq 1 ]]; then
+      ros2_activate_distro ${_ros2_available_distributions[1]}
+      return $?
+    else
+      ros2_usage
+      return 1
+    fi
+  fi
+
+  if [[ $# -ne 1 ]]; then
+    ros2_usage
+    return 1
+  fi
+
+  if [[ ${1} == '-h' ]]; then
+    ros2_usage
+    return 0
+  fi
+
+  if ros2_is_distro_available ${1}; then
+    if ros2_is_source_distro ${1}; then
+      ros2_activate_source_distro ${1}
+    else
+      ros2_activate_distro ${1}
+    fi
+    return $?
+  else
+    echo "ROS 2 distribution '${1}' is not available"
+    return 1
+  fi
+}
+
+##############################################################################
+# Other stuff
+##############################################################################
+
+alias cm="catkin_make -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+
+if [[ -f /usr/share/vcstool-completion/vcs.zsh ]]; then
+  source /usr/share/vcstool-completion/vcs.zsh
+fi
+
+export RCUTILS_COLORIZED_OUTPUT=1
+
+alias conair="rocker --nvidia --home --git --ssh --user --x11 --oyr-mount ~/.config ~/.zshrc -- osrf/ros:foxy-desktop"

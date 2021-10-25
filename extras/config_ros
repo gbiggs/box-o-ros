@@ -1,0 +1,742 @@
+if type -q bat
+  set bat_cmd bat
+else if type -q batcat
+  set bat_cmd batcat
+else
+  set bat_cmd less
+end
+
+##############################################################################
+# Workspace management
+##############################################################################
+
+if test -x "$WORKSPACES_DIRECTORY"
+  set -x WORKSPACES_DIRECTORY "$HOME/src/workspaces"
+end
+
+function workspace_usage
+  echo "Usage: ws <command>"
+  echo
+  echo "Commands:"
+  echo "  <name>    Go to workspace directory"
+  echo "  g <name>  Go to workspace directory"
+  echo "  n <name>  Create new workspace"
+  echo "  l         List workspaces"
+  echo "  s         Source workspace"
+  echo "  u         Update workspace"
+  echo "  c         Clean workspace"
+  echo "  t         Go to top of workspace"
+  echo "  db        Link the compile database into the workspace root"
+end
+
+function workspace_type
+  if test (count $argv) -eq 1
+    set base_dir $argv[1]
+  else
+    set base_dir .
+  end
+
+  if test -d "$base_dir/build" -a -d "$base_dir/install"
+    echo colcon
+  else if test -d "$base_dir/build" -a -d "$base_dir/devel"
+    echo catkin
+  else if test -d "$base_dir/src" -a (ls -l "$base_dir" | grep -c ^d) -eq 1
+    echo unbuilt
+  else
+    echo unknown
+  end
+end
+
+function workspace_get_top
+  set directory (pwd)
+  while true
+    set type (workspace_type "$directory")
+    if test "$type" != 'unknown'
+      echo $directory
+      return 0
+    end
+    if test "$directory" = '/'
+      break
+    end
+    set directory (dirname "$directory")
+  end
+  return 1
+end
+
+function workspace_at_top
+  set cwd (pwd)
+  set wt (workspace_get_top)
+  if test "$cwd" = "$wt"
+    return 0
+  else
+    return 1
+  end
+end
+
+function workspace_list
+  ls $WORKSPACES_DIRECTORY
+end
+
+function workspace_go
+  set workspace_dir $WORKSPACES_DIRECTORY/$argv[1]
+  if test -d "$workspace_dir"
+    cd "$workspace_dir"
+  else
+    echo "Workspace $argv[1] does not exist under $WORKSPACES_DIRECTORY"
+  end
+end
+
+function workspace_create
+  set workspace_dir $WORKSPACES_DIRECTORY/$argv[1]
+  if test -d "$workspace_dir"
+    echo "Workspace $argv[1] already exists"
+    return 1
+  end
+  mkdir "$workspace_dir"
+  if test ! -d "$workspace_dir"
+    echo "Failed to create workspace directory $argv[1]"
+    return 1
+  end
+  workspace_go "$argv[1]"
+  mkdir src
+  workspace_link_compile_database
+end
+
+function workspace_source
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  switch (workspace_type)
+    case colcon
+      if test -f install/local_setup.fish
+        source install/local_setup.fish
+      else
+        echo "Workspace is not ready for sourcing"
+        set result 1
+      end
+    case catkin
+      if test -f devel/setup.fish
+        source devel/setup.fish
+      else
+        echo "Workspace is not ready for sourcing"
+        set result 1
+      end
+    case unbuilt
+      echo "Workspace is not ready for sourcing"
+      set result 1
+    case '*'
+      echo "Unknown workspace type"
+      set result 1
+  end
+  if test $need_to_popd -eq -1
+    popd
+  end
+  return $result
+end
+
+function workspace_update
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  echo "Updating remotes"
+  vcs custom --args remote update
+  if test -f *.repos.url
+    for repos_url_file in *.repos.url
+      set url (cat $repos_url_file)
+      set repos_file (string sub -e -4 $repos_url_file)
+      echo "Updating $repos_file from $url"
+      wget -O $repos_file $url
+    end
+  end
+  if test -f *.repos
+    for repos_file in *.repos
+      echo "Updating src from repos file $repos_file"
+      vcs import src < $repos_file
+    end
+  end
+  echo "Pulling all repositories"
+  vcs pull
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function workspace_clean
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  switch (workspace_type)
+    case colcon
+      rm -r build install log
+    case catkin
+      rm -r build devel log
+    case unbuilt
+      echo "Workspace is already clean"
+    case '*'
+      echo "Unknown workspace type"
+      set result 1
+  end
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function workspace_go_to_top
+  set ws_top (workspace_get_top)
+  if test $status -ne 0
+    echo "No workspace root found in parent directories"
+    return 1
+  end
+  pushd $ws_top
+end
+
+function workspace_link_compile_database
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  set compile_db "compile_commands.json"
+  if test -L $compile_db
+    # Do nothing
+    set result 0
+  else if test -e $compile_db
+    echo "Compile database already exists but is not a symbolic link"
+    set result 1
+  else
+    ln -s build/$compile_db .
+  end
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function ws
+  switch $argv[1]
+    case g
+      if test (count $argv) -eq 1
+        workspace_go_to_top
+        return 0
+      else if test (count $argv) -ne 2
+        workspace_usage
+        return 1
+      end
+      workspace_go $argv[2]
+      return $status
+    case n
+      if test (count $argv) -ne 2
+        workspace_usage
+        return 1
+      end
+      workspace_create $argv[2]
+      return $status
+    case l
+      if test (count $argv) -ne 1
+        workspace_usage
+        return 1
+      end
+      workspace_list
+      return $status
+    case s
+      if test (count $argv) -ne 1
+        workspace_usage
+        return 1
+      end
+      workspace_source
+      return $status
+    case u
+      if test (count $argv) -ne 1
+        workspace_usage
+        return 1
+      end
+      workspace_update
+      return $status
+    case c
+      if test (count $argv) -ne 1
+        workspace_usage
+        return 1
+      end
+      workspace_clean
+      return $status
+    case t
+      if test (count $argv) -ne 1
+        workspace_usage
+        return 1
+      end
+      workspace_go_to_top
+      return $status
+    case db
+      if test (count $argv) -ne 1
+        workspace_usage
+        return 1
+      end
+      workspace_link_compile_database
+      return $status
+    case '*'
+      if test (count $argv) -eq 1
+        workspace_go $argv[1]
+        return $status
+      else
+        workspace_usage
+        return 1
+      end
+  end
+end
+
+
+##############################################################################
+# Colcon
+##############################################################################
+
+function colcon_usage
+   echo "Usage: c <command>"
+   echo
+   echo "Commands:"
+   echo "  b             Build workspace"
+   echo "  bp <package>  Build only package"
+   echo "  bu <package>  Build up to package"
+   echo "  t             Test workspace"
+   echo "  tp <package>  Test package"
+   echo "  tr            View test results"
+   echo
+   echo "Options:"
+   echo "  -v            Verbose output"
+end
+
+set COLCON_COMMON_ARGS "--symlink-install --cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON --ament-cmake-args -DCMAKE_EXPORT_COMPILE_COMMANDS=ON"
+set COLCON_BUILD_COMMAND "colcon build"
+set COLCON_VERBOSE_BUILD_COMMAND "VERBOSE=1 colcon build --event-handlers=console_cohesion+"
+
+function colcon_build
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  if test (count $argv) -eq 0
+    eval $COLCON_BUILD_COMMAND $COLCON_COMMON_ARGS
+  else
+    eval $COLCON_VERBOSE_BUILD_COMMAND $COLCON_COMMON_ARGS
+  end
+  set result $status
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function colcon_build_up_to_package
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  if test (count $argv) -eq 1
+    eval $COLCON_BUILD_COMMAND $COLCON_COMMON_ARGS --packages-up-to $argv[1]
+  else
+    eval $COLCON_VERBOSE_BUILD_COMMAND $COLCON_COMMON_ARGS --packages-up-to $argv[1]
+  end
+  set result $status
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function colcon_build_only_package
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  if test (count $argv) -eq 1
+    eval $COLCON_BUILD_COMMAND $COLCON_COMMON_ARGS --packages-select $argv[1]
+  else
+    eval $COLCON_VERBOSE_BUILD_COMMAND $COLCON_COMMON_ARGS --packages-select $argv[1]
+  end
+  set result $status
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function colcon_test
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  colcon test
+  set result $status
+  colcon test-result --verbose | $bat_cmd
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function colcon_test_package
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  colcon test --packages-select $argv[1]
+  set result $status
+  colcon test-result --verbose | $bat_cmd
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function colcon_view_test_results
+  set result 0
+  set need_to_popd 1
+  workspace_at_top
+  if test $status -ne 0
+    pushd (workspace_get_top)
+    set need_to_popd 0
+  end
+  colcon test-result --all | $bat_cmd
+  set result $status
+  if test $need_to_popd -eq 0
+    popd
+  end
+  return $result
+end
+
+function c
+  if test (workspace_type) = "unknown"
+    echo "Unknown workspace type"
+    return 1
+  end
+
+  argparse --min-args 0 --max-args 2 'v/verbose' 'h/help' -- $argv
+  or colcon_usage && return 1
+
+  if test $_flag_help
+    colcon_usage
+    return 0
+  end
+
+  if test (count $argv) -eq 0
+    colcon_build $_flag_verbose
+    return $status
+  end
+
+  switch $argv[1]
+    case -h
+      colcon_usage
+      return 0
+    case b
+      if test (count $argv) -eq 2
+        colcon_build_up_to_package $argv[2] $_flag_verbose
+        return $status
+      else if test (count $argv) -ne 1
+        colcon_usage
+        return 1
+      else
+        colcon_build $_flag_verbose
+        return $status
+      end
+    case bp
+      if test (count $argv) -ne 2
+        colcon_usage
+        return 1
+      end
+      colcon_build_only_package $argv[2] $_flag_verbose
+      return $status
+    case bu
+      if test (count $argv) -ne 2
+        colcon_usage
+        return 1
+      end
+      colcon_build_up_to_package $argv[2] $_flag_verbose
+      return $status
+    case t
+      if test (count $argv) -ne 1
+        colcon_usage
+        return 1
+      end
+      colcon_test
+      return $status
+    case tp
+      if test (count $argv) -ne 2
+        colcon_usage
+        return 1
+      end
+      colcon_test_package $argv[2]
+      return $status
+    case tr
+      if test (count $argv) -ne 1
+        colcon_usage
+        return 1
+      end
+      colcon_view_test_results
+      return $status
+    case '*'
+      colcon_usage
+      return 1
+  end
+end
+
+##############################################################################
+# ROS 1 distro activation
+##############################################################################
+
+set _ros1_all_distributions kinetic lunar melodic noetic
+set _ros1_available_distributions
+for distro in $_ros1_all_distributions
+  if test -d $ROS_BASE_DIR/$distro
+    set _ros1_available_distrubitions $_ros1_available_distributions $distro
+  end
+end
+set _ros1_available_source_distributions ()
+if test -d $ROS1_WORKSPACES_DIRECTORY
+  for workspace in (ls -l $ROS1_WORKSPACES_DIRECTORY | grep '^d' | awk '{ print $9; }' | tr '\n' ' ')
+    set -a _ros1_available_source_distributions $workspace
+  end
+end
+
+function ros1_is_distro_available
+  if contains $argv[1] $_ros_available_distributions
+    return 0
+  else if contains $argv[1] $_ros_available_source_distributions
+    return 0
+  else
+    return 1
+  end
+end
+
+function ros1_is_source_distro
+  if contains $argv[1] $_ros_available_source_distributions
+    return 0
+  else
+    return 1
+  end
+end
+
+function ros1_usage
+  echo "Usage:"
+  echo
+  echo "r1 [distribution]"
+  echo
+  echo "Available ROS distributions:"
+  for distro in $_ros1_available_distributions
+    echo "  $distro"
+  end
+  if test (count $_ros1_available_source_distributions) -gt 0
+    echo "Available ROS source distributions:"
+    for distro in $_ros1_available_source_distributions
+      echo "  $distro"
+    end
+  end
+  if test (count $_ros1_available_distributions) -eq 1
+    echo
+    echo "If no distribution name is provided, $_ros1_available_distributions will be activated"
+  end
+end
+
+function ros1_activate_distro
+  if test -n $ROS_DISTRO
+    echo "ROS has already been activated in this shell."
+    return 1
+  end
+
+  echo "Activating ROS distribution '$argv[1]'"
+  source $ROS_BASE_DIR/$argv[1]/setup.fish
+end
+
+function ros1_activate_source_distro
+  if test -f $ROS1_WORKSPACES_DIRECTORY/$argv[1]/devel/local_setup.fish
+    echo "Activating ROS source distribution '$argv[1]'"
+    source $ROS1_WORKSPACES_DIRECTORY/$argv[1]/devel/local_setup.zsh
+    return $status
+  else
+    echo "Source distribution is not ready for sourcing"
+    return 1
+  end
+end
+
+function r1
+  if test (count $argv) -eq 0
+    if test (count $_ros1_available_distributions) -eq 1
+      ros1_activate_distro $_ros1_available_distributions[1]
+      return $status
+    else
+      ros1_usage
+      return 1
+    end
+  end
+
+  if test (count $argv) -ne 1
+    ros1_usage
+    return 1
+  end
+
+  if test $argv[1] = '-h'
+    ros1_usage
+    return 0
+  end
+
+  ros1_is_distro_available $argv[1]
+  if test $status -eq 0
+    ros1_is_source_distro $argv[1]
+    if test $status -eq 0
+      ros1_activate_source_distro $argv[1]
+    else
+      ros1_activate_distro $argv[1]
+    end
+    return $status
+  else
+    echo "ROS distribution '$argv[1]' is not available"
+    return 1
+  end
+end
+
+##############################################################################
+# ROS 2 distro activation
+##############################################################################
+
+set _ros2_all_distributions dashing eloquent galactic humble rolling
+set _ros2_available_distributions
+for distro in $_ros2_all_distributions
+  if test -d $ROS_BASE_DIR/$distro
+    set _ros2_available_distrubitions $_ros2_available_distributions $distro
+  end
+end
+set _ros2_available_source_distributions ()
+if test -d $ROS2_WORKSPACES_DIRECTORY
+  for workspace in (ls -l $ROS2_WORKSPACES_DIRECTORY | grep '^d' | awk '{ print $9; }')
+    set -a _ros2_available_source_distributions $workspace
+  end
+end
+
+function ros2_is_distro_available
+  if contains $argv[1] $_ros2_available_distributions
+    return 0
+  else if contains $argv[1] $_ros2_available_source_distributions
+    return 0
+  else
+    return 1
+  end
+end
+
+function ros2_is_source_distro
+  if contains $argv[1] $_ros2_available_source_distributions
+    return 0
+  else
+    return 1
+  end
+end
+
+function ros2_usage
+  echo "Usage:"
+  echo
+  echo "r2 [distribution]"
+  echo
+  echo "Available ROS distributions:"
+  for distro in $_ros2_available_distributions
+    echo "  $distro"
+  end
+  if test (count $_ros2_available_source_distributions) -gt 0
+    echo "Available ROS source distributions:"
+    for distro in $_ros2_available_source_distributions
+      echo "  $distro"
+    end
+  end
+  if test (count $_ros2_available_distributions) -eq 1
+    echo
+    echo "If no distribution name is provided, $_ros2_available_distributions will be activated"
+  end
+end
+
+function ros2_activate_distro
+  if test -n $ROS_DISTRO
+    echo "ROS has already been activated in this shell."
+    return 1
+  end
+
+  echo "Activating ROS distribution '$argv[1]'"
+  source $ROS_BASE_DIR/$argv[1]/setup.fish
+end
+
+function ros2_activate_source_distro
+  if test -f $ROS2_WORKSPACES_DIRECTORY/$argv[1]/devel/local_setup.fish
+    echo "Activating ROS source distribution '$argv[1]'"
+    source $ROS2_WORKSPACES_DIRECTORY/$argv[1]/devel/local_setup.zsh
+    return $status
+  else
+    echo "Source distribution is not ready for sourcing"
+    return 1
+  end
+end
+
+function r2
+  if test (count $argv) -eq 0
+    if test (count $_ros2_available_distributions) -eq 1
+      ros2_activate_distro $_ros2_available_distributions[1]
+      return $status
+    else
+      ros2_usage
+      return 1
+    end
+  end
+
+  if test (count $argv) -ne 1
+    ros2_usage
+    return 1
+  end
+
+  if test $argv[1] = '-h'
+    ros2_usage
+    return 0
+  end
+
+  ros2_is_distro_available $argv[1]
+  if test $status -eq 0
+    ros2_is_source_distro $argv[1]
+    if test $status -eq 0
+      ros2_activate_source_distro $argv[1]
+    else
+      ros2_activate_distro $argv[1]
+    end
+    return $status
+  else
+    echo "ROS distribution '$argv[1]' is not available"
+    return 1
+  end
+end
+
+if test -f /usr/share/vcstool-completion/vcs.fish
+  source /usr/share/vcstool-completion/vcs.fish
+end
